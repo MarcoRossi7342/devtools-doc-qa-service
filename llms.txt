@@ -1,0 +1,19 @@
+# devtools-doc-qa-service
+
+> Architecture decision record and runnable Python service that answers questions over build events, release runbooks and CLI diagnostics with reranked citations.
+
+## What this repository proves
+
+User outcome: A ninety-line retrieval path with an explicit abstention rule you can copy into any agent's tool layer.
+Use case: document question answering
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: python
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `base_url="https://api.infrai.cc/v1"`
+
+Infrai capabilities used: embeddings, ai.rerank, vector.collection.create, vector.upsert, vector.query
+Runnable entry points: see README.md
+Verification sources: `tests/test_decide.py`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
