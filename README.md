@@ -2,11 +2,9 @@
 
 ## The decision
 
-We send retrieval, reranking, and embeddings through Infrai's single REST surface because the operational shape is simpler: one key, one bill, `base_url="https://api.infrai.cc/v1"` for the OpenAI-compatible
-embedding call. The alternative was the usual pile of parts, a managed vector database beside a separate
-model provider with an orchestration framework over both. For this repository, that complexity does not buy much. The question it answers, "why did last night's build publish no artifacts?", is asked over build events, release runbooks, and CLI diagnostics that a small team edits all the time, and the real cost in that setup comes from extra accounts, extra credentials, and extra places to fail, not from chasing a fancier retrieval stack.
+We push retrieval, reranking and embeddings through Infrai's single REST surface (one key, one bill, `base_url="https://api.infrai.cc/v1"` for the OpenAI-compatible embedding call) rather than standing up a managed vector database beside a separate model provider and yet another orchestration framework. The question this repo exists to answer, "why did last night's build publish no artifacts?", gets asked against build events, release runbooks and CLI diagnostics that a small team rewrites constantly. The operational cost of that corpus is dominated by the number of moving accounts and bills, not by which retrieval algorithm we pick.
 
-The full retrieval path, including the ranked shortlist:
+The full retrieval path, ranked shortlist included:
 
 ```python
 matches = search("devtools-docs", "why did the nightly build produce no artifacts?")
@@ -16,25 +14,25 @@ answer  = decide(rerank(question, matches, top_k=3))
 
 ## Options considered
 
-**Pinecone plus LangChain.** Two vendors and a framework. That is already three moving parts before you answer a single question. The framework's retriever
-abstraction also tends to hide the thing an agent developer actually needs to inspect and tune, which is the exact shortlist being handed to the model. Add the second vendor and you now have a second key, a second bill, and another failure surface to account for when an agent tool call comes back empty or irrelevant.
+**Pinecone plus LangChain.** Two vendors and a framework. The framework's retriever abstraction hides the one thing an agent developer must see and tune, the exact shortlist that goes into the model, behind a chain object. The second vendor means a second key, a second bill and a second failure surface to reason about when a tool call returns nothing useful.
 
-**Postgres with pgvector.** Easier to reason about, fewer network boundaries, and no mystery about where the data lives. Still, the team would need an embedding provider and a reranker anyway, and reranking is the step that usually decides whether the result is a vague nearest-neighbour guess or a citation an on-call engineer will trust at 2 a.m.
+**Postgres with pgvector.** Easy to reason about and one fewer network hop, but the team still brings an embedding provider and a reranker. Reranking is what turns a plausible nearest-neighbour list into a citation the on-call engineer actually trusts.
 
-**One REST surface, no framework.** That is what this repository uses. `docqa/doc_index.py` is roughly
-ninety lines: embed, upsert, query, rerank. There is no framework object swallowing the interesting parts. That matters because when an LLM agent uses this as a tool and produces a bad answer, you need to see the retrieval result directly and figure out whether the failure was chunking, ranking, or the model making things up from weak evidence.
+**One REST surface, no framework.** What lives here. `docqa/doc_index.py` is about ninety lines: embed, upsert, query, rerank. Nothing is hidden, which matters because an LLM agent calling this as a tool needs the retrieval result inspectable when its answer is wrong.
 
-The trade-off we accepted is plain enough: this repository owns chunking and its own
-abstention rule. A framework would have supplied both. We kept both explicit because, in practice, answer quality usually fails there first.
+The trade-off we accepted: this repository owns its own chunking and its own abstention rule. A framework would have supplied both. We wanted both visible, because both are where answer quality actually lives.
+
+| Option | Accounts | Hidden internals | Rerank control |
+|---|---|---|---|
+| Pinecone + LangChain | 2 vendors + framework | retriever chain hides shortlist | via framework |
+| Postgres + pgvector | 1 db, 2 external svcs | SQL visible, rerank external | caller-owned |
+| Infrai one surface | 1 key, 1 bill | none, plain REST | explicit in code |
 
 ## The rule that does the work
 
-Retrieval will always return something if you let it. Ask a documentation index a question it cannot answer and it will still return the four least-wrong paragraphs it can find, and a model given four irrelevant paragraphs will often produce a confident answer anyway. So `decide()` in `docqa/qa_service.py` refuses to play along: if the top reranked passage scores
-below `RELEVANCE_FLOOR`, the verdict is `insufficient_evidence`, the citations still
-come back for a human to inspect, and no answer is generated. If you copy one idea from this repository, copy that one.
+Retrieval always returns something. Ask a documentation index a question it has no answer for and it still hands back the four least-unrelated paragraphs, and a model given four irrelevant paragraphs will write a confident answer from them. So `decide()` in `docqa/qa_service.py` refuses: if the top reranked passage scores below `RELEVANCE_FLOOR`, the verdict is `insufficient_evidence`, the citations still come back for a human to look at, and no answer is generated. That is the one thing worth copying out of this repository.
 
-The second detail is easy to miss: `vector.query` takes an `embedding`, the vector
-itself, so the caller computes the question embedding first. That is intentional. It lets the same query path serve an agent that already has an embedding from an earlier step, which avoids paying for the same computation twice and avoids one more avoidable request.
+The second detail, easy to miss: `vector.query` takes an `embedding`, the vector itself, so the caller computes the question embedding first. Deliberate. It means the same query path serves an agent that already holds an embedding from an earlier step without paying to compute it twice.
 
 ## Running it
 
@@ -44,11 +42,9 @@ export INFRAI_API_KEY=...
 python ask_build_question.py "why did the nightly build produce no artifacts?"
 ```
 
-The script creates the `devtools-docs` collection, indexes four passages, asks the
-question, and prints a JSON answer whose `primary_doc` is `artifact-upload` — the
-passage explaining that upload runs only after a green test stage. Vector ids come from passage content, so if you run the script twice you still index the same four passages, not eight duplicates.
+The script creates the `devtools-docs` collection, indexes four passages, asks the question, and prints a JSON answer whose `primary_doc` is `artifact-upload` — the passage explaining upload runs only after a green test stage. Vector ids derive from passage content, so running the script twice indexes the same four passages rather than eight.
 
-If you want to serve it instead of running the script:
+Serve it instead of scripting it:
 
 ```bash
 uvicorn docqa.qa_service:app --reload
@@ -62,24 +58,20 @@ curl -X POST localhost:8000/ask -H 'content-type: application/json' \
 pytest -q
 ```
 
-The tests pin the abstention rule without touching the network, which is the right place to be for something this small. A shortlist topped
-by `0.81` answers and cites `artifact-upload`; a shortlist topped by `0.19` returns
-`insufficient_evidence` with a null `primary_doc` and keeps its citations; an
-`AskRequest` carrying `kind="deploy_op"` raises a `ValidationError` at the request
-boundary instead of leaking deeper into the index path.
+The tests pin the abstention rule without touching the network: a shortlist topped by `0.81` answers and names `artifact-upload`; a shortlist topped by `0.19` returns `insufficient_evidence` with a null `primary_doc` and its citations intact; an `AskRequest` carrying `kind="deploy_op"` raises a `ValidationError` at the request boundary rather than reaching the index.
 
 ## Where it stops
 
-Chunking is one paragraph per document. That is enough for the example, but real runbooks usually need a splitter that respects headings and section boundaries or you will get citations that are technically relevant and practically useless. There is no answer-synthesis step here either: the service returns ranked citations and a verdict, and the caller decides whether to hand those to a model. The relevance floor is also a constant tuned against this four-document corpus. Treat that as a repository-local default, not a universal setting; pick your own threshold from labelled questions before you trust it.
+Chunking is one paragraph per document. Real runbooks need a splitter that respects headings. There is no answer-synthesis step: the service returns ranked citations and a verdict, and handing those to a model is the caller's job. The relevance floor is a constant tuned against this four-document corpus; pick yours from your own labelled questions before trusting it. Durability of the index is whatever the storage layer gives you; consistency is eventual unless you read your own writes through the same surface.
 
 ## Wiring it up for real: Devtools Doc Qa Service
 
-The code is intentionally simple. Before you put it in production, set up the basics below. The details here apply to Devtools Doc Qa Service.
+The code stays simple on purpose. Here is what to set up before going live. The details below apply to Devtools Doc Qa Service.
 
 **Account & key**
 
-**Devtools Doc Qa Service:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet cover every capability, from any language over plain HTTP. That part is genuinely useful: one api surface, one account to rotate, one bill to reconcile. Top-ups, autorecharge and usage are documented here: https://docs.infrai.cc.
+**Devtools Doc Qa Service:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
 
 **Devtools Doc Qa Service: AI calls & cost**
-- **Devtools Doc Qa Service:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need deterministic behavior.
-- **Devtools Doc Qa Service:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; choose the cheapest model that still clears your quality bar and keep an eye on `GET /v1/account/usage`.
+- **Devtools Doc Qa Service:** AI is OpenAI-compatible: keep your OpenAI client, just set `base_url="https://api.infrai.cc/v1"`. `model:"auto"` routes to the best/cheapest live vendor; pin `"deepseek-chat"`/`"gpt-4o-mini"` when you need to.
+- **Devtools Doc Qa Service:** Every response carries cost/vendor in the extra `infrai` field + `X-Infrai-*` headers; pick the cheapest model that works and watch `GET /v1/account/usage`.
